@@ -4,14 +4,17 @@ import numpy as np
 import random
 import math
 import io
+import zipfile
+import itertools
 
 # ==========================================
 # ENGINE A: DYNAMIC PREMIUM ENGINE (20 IMAGES)
 # ==========================================
 class PremiumPalettes:
     @staticmethod
-    def get_palette():
-        palettes = [
+    def get_all_palettes():
+        # Returning all palettes to guarantee unique combinations
+        return [
             ["#141E30", "#243B55", "#FFD700", "#FF8C00"], # Luxury Night & Gold
             ["#2c3e50", "#3498db", "#e74c3c", "#f1c40f"], # Corporate Pop
             ["#ff9a9e", "#fecfef", "#a18cd1", "#fbc2eb"], # Soft Pastel
@@ -21,7 +24,6 @@ class PremiumPalettes:
             ["#ece9e6", "#ffffff", "#8e9eab", "#283048"], # Minimalist
             ["#2E1437", "#4A1C40", "#F2D0A9", "#E63946"], # Memphis Retro
         ]
-        return random.choice(palettes)
 
 class PremiumEngine:
     @staticmethod
@@ -146,26 +148,26 @@ def generate_premium_frame(company_name, theme_colors, text_placement, style_typ
 # ENGINE B: THE CURATED 20 THEMES ENGINE
 # ==========================================
 THEMES = [
-    {"name": "Neon Cyberpunk", "bg": (20, 20, 25), "c1": (255, 0, 255), "c2": (0, 255, 255), "pattern": "grid", "asset": "tech_lines"},
-    {"name": "Kawaii Pastel", "bg": (255, 228, 225), "c1": (176, 224, 230), "c2": (255, 250, 205), "pattern": "polka_dots", "asset": "stars"},
-    {"name": "Luxury Gold", "bg": (15, 15, 15), "c1": (212, 175, 55), "c2": (255, 223, 0), "pattern": "none", "asset": "elegant_dust"},
-    {"name": "Forest Nature", "bg": (240, 255, 240), "c1": (34, 139, 34), "c2": (154, 205, 50), "pattern": "leaves_abstract", "asset": "bubbles"},
-    {"name": "Ocean Depth", "bg": (10, 25, 47), "c1": (0, 191, 255), "c2": (0, 128, 128), "pattern": "sine_waves", "asset": "bubbles"},
-    {"name": "Pop Art", "bg": (255, 255, 0), "c1": (255, 0, 0), "c2": (0, 0, 255), "pattern": "halftone", "asset": "comic_splats"},
-    {"name": "Synthwave 80s", "bg": (43, 0, 60), "c1": (242, 34, 255), "c2": (255, 124, 0), "pattern": "grid", "asset": "stars"},
-    {"name": "Minimalist Mono", "bg": (240, 240, 240), "c1": (100, 100, 100), "c2": (50, 50, 50), "pattern": "none", "asset": "geometry_shards"},
-    {"name": "Tropical Vibe", "bg": (255, 127, 80), "c1": (255, 215, 0), "c2": (255, 20, 147), "pattern": "polka_dots", "asset": "sunburst"},
-    {"name": "Midnight Magic", "bg": (25, 25, 112), "c1": (238, 130, 238), "c2": (255, 215, 0), "pattern": "none", "asset": "stars"},
-    {"name": "Candy Store", "bg": (255, 182, 193), "c1": (64, 224, 208), "c2": (255, 255, 255), "pattern": "stripes", "asset": "bubbles"},
-    {"name": "Coffee House", "bg": (245, 222, 179), "c1": (139, 69, 19), "c2": (205, 133, 63), "pattern": "halftone", "asset": "splats"},
-    {"name": "SciFi Hologram", "bg": (0, 0, 0), "c1": (0, 255, 255), "c2": (255, 255, 255), "pattern": "grid", "asset": "tech_lines"},
-    {"name": "Retro 70s", "bg": (244, 164, 96), "c1": (139, 69, 19), "c2": (218, 165, 32), "pattern": "sine_waves", "asset": "bubbles"},
-    {"name": "Velvet Royal", "bg": (75, 0, 130), "c1": (220, 20, 60), "c2": (218, 165, 32), "pattern": "none", "asset": "elegant_dust"},
-    {"name": "Fresh Spring", "bg": (255, 255, 255), "c1": (152, 251, 152), "c2": (240, 230, 140), "pattern": "polka_dots", "asset": "splats"},
-    {"name": "Lava Lamp", "bg": (139, 0, 0), "c1": (255, 69, 0), "c2": (255, 140, 0), "pattern": "none", "asset": "large_blobs"},
-    {"name": "Winter Ice", "bg": (240, 248, 255), "c1": (173, 216, 230), "c2": (192, 192, 192), "pattern": "stripes", "asset": "geometry_shards"},
-    {"name": "Graffiti Alley", "bg": (40, 40, 40), "c1": (255, 20, 147), "c2": (0, 255, 0), "pattern": "halftone", "asset": "comic_splats"},
-    {"name": "Abstract Art", "bg": (245, 245, 245), "c1": (255, 99, 71), "c2": (70, 130, 180), "pattern": "none", "asset": "geometry_shards"}
+    {"name": "Neon_Cyberpunk", "bg": (20, 20, 25), "c1": (255, 0, 255), "c2": (0, 255, 255), "pattern": "grid", "asset": "tech_lines"},
+    {"name": "Kawaii_Pastel", "bg": (255, 228, 225), "c1": (176, 224, 230), "c2": (255, 250, 205), "pattern": "polka_dots", "asset": "stars"},
+    {"name": "Luxury_Gold", "bg": (15, 15, 15), "c1": (212, 175, 55), "c2": (255, 223, 0), "pattern": "none", "asset": "elegant_dust"},
+    {"name": "Forest_Nature", "bg": (240, 255, 240), "c1": (34, 139, 34), "c2": (154, 205, 50), "pattern": "leaves_abstract", "asset": "bubbles"},
+    {"name": "Ocean_Depth", "bg": (10, 25, 47), "c1": (0, 191, 255), "c2": (0, 128, 128), "pattern": "sine_waves", "asset": "bubbles"},
+    {"name": "Pop_Art", "bg": (255, 255, 0), "c1": (255, 0, 0), "c2": (0, 0, 255), "pattern": "halftone", "asset": "comic_splats"},
+    {"name": "Synthwave_80s", "bg": (43, 0, 60), "c1": (242, 34, 255), "c2": (255, 124, 0), "pattern": "grid", "asset": "stars"},
+    {"name": "Minimalist_Mono", "bg": (240, 240, 240), "c1": (100, 100, 100), "c2": (50, 50, 50), "pattern": "none", "asset": "geometry_shards"},
+    {"name": "Tropical_Vibe", "bg": (255, 127, 80), "c1": (255, 215, 0), "c2": (255, 20, 147), "pattern": "polka_dots", "asset": "sunburst"},
+    {"name": "Midnight_Magic", "bg": (25, 25, 112), "c1": (238, 130, 238), "c2": (255, 215, 0), "pattern": "none", "asset": "stars"},
+    {"name": "Candy_Store", "bg": (255, 182, 193), "c1": (64, 224, 208), "c2": (255, 255, 255), "pattern": "stripes", "asset": "bubbles"},
+    {"name": "Coffee_House", "bg": (245, 222, 179), "c1": (139, 69, 19), "c2": (205, 133, 63), "pattern": "halftone", "asset": "splats"},
+    {"name": "SciFi_Hologram", "bg": (0, 0, 0), "c1": (0, 255, 255), "c2": (255, 255, 255), "pattern": "grid", "asset": "tech_lines"},
+    {"name": "Retro_70s", "bg": (244, 164, 96), "c1": (139, 69, 19), "c2": (218, 165, 32), "pattern": "sine_waves", "asset": "bubbles"},
+    {"name": "Velvet_Royal", "bg": (75, 0, 130), "c1": (220, 20, 60), "c2": (218, 165, 32), "pattern": "none", "asset": "elegant_dust"},
+    {"name": "Fresh_Spring", "bg": (255, 255, 255), "c1": (152, 251, 152), "c2": (240, 230, 140), "pattern": "polka_dots", "asset": "splats"},
+    {"name": "Lava_Lamp", "bg": (139, 0, 0), "c1": (255, 69, 0), "c2": (255, 140, 0), "pattern": "none", "asset": "large_blobs"},
+    {"name": "Winter_Ice", "bg": (240, 248, 255), "c1": (173, 216, 230), "c2": (192, 192, 192), "pattern": "stripes", "asset": "geometry_shards"},
+    {"name": "Graffiti_Alley", "bg": (40, 40, 40), "c1": (255, 20, 147), "c2": (0, 255, 0), "pattern": "halftone", "asset": "comic_splats"},
+    {"name": "Abstract_Art", "bg": (245, 245, 245), "c1": (255, 99, 71), "c2": (70, 130, 180), "pattern": "none", "asset": "geometry_shards"}
 ]
 
 def draw_pattern(draw, width, height, theme):
@@ -276,34 +278,42 @@ def generate_curated_theme_frame(company_name, theme, text_placement, w, h):
     return base
 
 # ==========================================
-# STREAMLIT UI: 40 IMAGES TOTAL W/ MEMORY STATE
+# STREAMLIT UI: 40 IMAGES WITH ZIP DOWNLOAD
 # ==========================================
 st.set_page_config(page_title="Mega 40-Frame Generator", layout="wide")
 st.title("✨ Mega Studio Agent (40 Frames)")
 
-# --- 1. SET UP THE MEMORY (SESSION STATE) ---
+# Set up memory (Session State) to hold the 40 generated images
 if 'generated_images' not in st.session_state:
     st.session_state.generated_images = []
 
 size_choice = st.radio("Select Frame Orientation:", ["Portrait (1200 x 1800)", "Landscape (1800 x 1200)"], horizontal=True)
 company_name = st.text_input("Enter Company Name", "STREET ORIGINS")
 
-# --- 2. THE GENERATOR BUTTON ---
 if st.button("Generate All 40 Designs"):
     if company_name:
         current_w, current_h = (1200, 1800) if "Portrait" in size_choice else (1800, 1200)
         
-        # Clear old images from memory
+        # Clear old images
         st.session_state.generated_images = []
         
-        with st.spinner(f"Generating 40 unique {size_choice} designs... this takes a few seconds."):
-            all_styles = ["Bokeh", "Memphis", "Halftone", "CyberTech", "Liquid", "RetroStripes"]
+        with st.spinner(f"Generating 40 unique {size_choice} designs... this takes about 10-15 seconds."):
             
-            # Generate Collection 1 (1-20)
+            # --- Guarantee Unique Combinations for Engine A ---
+            all_styles = ["Bokeh", "Memphis", "Halftone", "CyberTech", "Liquid", "RetroStripes"]
+            all_palettes = PremiumPalettes.get_all_palettes()
+            
+            # Create a list of all 48 possible style+palette combos and shuffle them
+            unique_combinations = list(itertools.product(all_styles, all_palettes))
+            random.shuffle(unique_combinations)
+            
+            # 1. Engine A (First 20 Images)
             for i in range(20):
                 placement = "Top" if i < 5 else "Bottom" if i < 10 else random.choice(["Top", "Bottom", "Both"])
-                colors = PremiumPalettes.get_palette()
-                style = random.choice(all_styles)
+                
+                # Pick guaranteed unique combo
+                style, colors = unique_combinations[i] 
+                
                 img = generate_premium_frame(company_name, colors, placement, style, current_w, current_h)
                 
                 buf = io.BytesIO()
@@ -312,11 +322,11 @@ if st.button("Generate All 40 Designs"):
                 st.session_state.generated_images.append({
                     "data": buf.getvalue(),
                     "caption": f"Dynamic: {style} ({placement})",
-                    "filename": f"{company_name}_{style}_{i+1}.png",
+                    "filename": f"{company_name}_{style}_Dynamic_{i+1}.png",
                     "collection": "1"
                 })
 
-            # Generate Collection 2 (21-40)
+            # 2. Engine B (Curated 20 Themes)
             for i in range(20):
                 theme = THEMES[i]
                 placement = "Top" if i < 5 else "Bottom" if i < 10 else random.choice(["Top", "Bottom", "Both"])
@@ -328,17 +338,34 @@ if st.button("Generate All 40 Designs"):
                 st.session_state.generated_images.append({
                     "data": buf.getvalue(),
                     "caption": f"{theme['name']} ({placement})",
-                    "filename": f"{company_name}_{theme['name']}.png",
+                    "filename": f"{company_name}_{theme['name']}_Curated_{i+1}.png",
                     "collection": "2"
                 })
     else:
         st.warning("Please enter a company name.")
 
-# --- 3. DISPLAY FROM MEMORY ---
-# This block runs automatically even after a button click!
+# --- DISPLAY MEMORY & ZIP EXPORT LOGIC ---
 if len(st.session_state.generated_images) == 40:
-    st.success("All 40 Designs Ready! Download them below.")
+    st.success("All 40 Designs Ready! Download them individually below, or download all at once.")
     
+    # --- CREATE ZIP FILE IN MEMORY ---
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for item in st.session_state.generated_images:
+            zip_file.writestr(item["filename"], item["data"])
+            
+    # Show the Download All Button at the top!
+    st.download_button(
+        label="📦 DOWNLOAD ALL 40 IMAGES (ZIP FILE)",
+        data=zip_buffer.getvalue(),
+        file_name=f"{company_name}_All_Frames.zip",
+        mime="application/zip",
+        use_container_width=True
+    )
+    
+    st.markdown("---")
+    
+    # Display the grid for individual downloads
     st.write("### Collection 1: Dynamic Styles (1-20)")
     for row in range(4):
         cols = st.columns(5)
