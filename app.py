@@ -231,7 +231,6 @@ def generate_curated_theme_frame(company_name, theme, text_placement, w, h):
         margin_top, margin_bottom, margin_sides = 150, 150, 180
     empty_rect = (margin_sides, margin_top, w - margin_sides, h - margin_bottom)
 
-    # Convert theme background hex color
     bg_color = '#%02x%02x%02x' % theme["bg"]
     c2_color = '#%02x%02x%02x' % theme["c2"]
     
@@ -242,7 +241,6 @@ def generate_curated_theme_frame(company_name, theme, text_placement, w, h):
     base = PremiumEngine.add_noise(base, intensity=12)
     base = base.filter(ImageFilter.SMOOTH_MORE)
 
-    # Exact Same 3D Shadow and Mask Logic to guarantee consistency
     shadow_offset = 20
     shadow_layer = Image.new('RGBA', (w, h), (0,0,0,0))
     shadow_draw = ImageDraw.Draw(shadow_layer)
@@ -256,7 +254,6 @@ def generate_curated_theme_frame(company_name, theme, text_placement, w, h):
     base.paste((255, 255, 255, 255), (0, 0), mask)
     draw.rounded_rectangle(empty_rect, radius=60, outline=theme["c2"]+(255,), width=5)
 
-    # Typography (Exact same placement logic)
     try: font = ImageFont.truetype("arialbd.ttf", 95) 
     except: font = ImageFont.load_default(size=85)
     text_str = company_name.upper()
@@ -279,53 +276,85 @@ def generate_curated_theme_frame(company_name, theme, text_placement, w, h):
     return base
 
 # ==========================================
-# STREAMLIT UI: 40 IMAGES TOTAL
+# STREAMLIT UI: 40 IMAGES TOTAL W/ MEMORY STATE
 # ==========================================
-st.set_page_config(page_title="Photo Frame Layout Generator", layout="wide")
-st.title("✨Photo Frame Layout Generator (40 Frames)")
+st.set_page_config(page_title="Mega 40-Frame Generator", layout="wide")
+st.title("✨ Mega Studio Agent (40 Frames)")
+
+# --- 1. SET UP THE MEMORY (SESSION STATE) ---
+if 'generated_images' not in st.session_state:
+    st.session_state.generated_images = []
 
 size_choice = st.radio("Select Frame Orientation:", ["Portrait (1200 x 1800)", "Landscape (1800 x 1200)"], horizontal=True)
 company_name = st.text_input("Enter Company Name", "STREET ORIGINS")
 
+# --- 2. THE GENERATOR BUTTON ---
 if st.button("Generate All 40 Designs"):
     if company_name:
         current_w, current_h = (1200, 1800) if "Portrait" in size_choice else (1800, 1200)
-        st.write(f"Generating 40 unique {size_choice} designs...")
         
-        all_styles = ["Bokeh", "Memphis", "Halftone", "CyberTech", "Liquid", "RetroStripes"]
+        # Clear old images from memory
+        st.session_state.generated_images = []
         
-        # 1. Render First 20 Images (Engine A)
-        st.write("### Collection 1: Dynamic Styles (1-20)")
-        for row in range(4):
-            cols = st.columns(5)
-            for col in range(5):
-                idx = (row * 5) + col
-                placement = "Top" if idx < 5 else "Bottom" if idx < 10 else random.choice(["Top", "Bottom", "Both"])
+        with st.spinner(f"Generating 40 unique {size_choice} designs... this takes a few seconds."):
+            all_styles = ["Bokeh", "Memphis", "Halftone", "CyberTech", "Liquid", "RetroStripes"]
+            
+            # Generate Collection 1 (1-20)
+            for i in range(20):
+                placement = "Top" if i < 5 else "Bottom" if i < 10 else random.choice(["Top", "Bottom", "Both"])
                 colors = PremiumPalettes.get_palette()
                 style = random.choice(all_styles)
+                img = generate_premium_frame(company_name, colors, placement, style, current_w, current_h)
                 
-                with cols[col]:
-                    img = generate_premium_frame(company_name, colors, placement, style, current_w, current_h)
-                    st.image(img, caption=f"Dynamic: {style} ({placement})", use_container_width=True)
-                    buf = io.BytesIO()
-                    img.save(buf, format="PNG")
-                    st.download_button("Download", data=buf.getvalue(), file_name=f"{company_name}_{style}_{idx+1}.png", mime="image/png", key=f"dl_a_{idx}")
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                
+                st.session_state.generated_images.append({
+                    "data": buf.getvalue(),
+                    "caption": f"Dynamic: {style} ({placement})",
+                    "filename": f"{company_name}_{style}_{i+1}.png",
+                    "collection": "1"
+                })
 
-        # 2. Render Next 20 Images (Engine B - Predefined Themes)
-        st.write("### Collection 2: Curated Themes (21-40)")
-        for row in range(4):
-            cols = st.columns(5)
-            for col in range(5):
-                idx = (row * 5) + col
-                theme = THEMES[idx]
-                placement = "Top" if idx < 5 else "Bottom" if idx < 10 else random.choice(["Top", "Bottom", "Both"])
+            # Generate Collection 2 (21-40)
+            for i in range(20):
+                theme = THEMES[i]
+                placement = "Top" if i < 5 else "Bottom" if i < 10 else random.choice(["Top", "Bottom", "Both"])
+                img = generate_curated_theme_frame(company_name, theme, placement, current_w, current_h)
                 
-                with cols[col]:
-                    img = generate_curated_theme_frame(company_name, theme, placement, current_w, current_h)
-                    st.image(img, caption=f"{theme['name']} ({placement})", use_container_width=True)
-                    buf = io.BytesIO()
-                    img.save(buf, format="PNG")
-                    st.download_button("Download", data=buf.getvalue(), file_name=f"{company_name}_{theme['name']}.png", mime="image/png", key=f"dl_b_{idx}")
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                
+                st.session_state.generated_images.append({
+                    "data": buf.getvalue(),
+                    "caption": f"{theme['name']} ({placement})",
+                    "filename": f"{company_name}_{theme['name']}.png",
+                    "collection": "2"
+                })
     else:
-
         st.warning("Please enter a company name.")
+
+# --- 3. DISPLAY FROM MEMORY ---
+# This block runs automatically even after a button click!
+if len(st.session_state.generated_images) == 40:
+    st.success("All 40 Designs Ready! Download them below.")
+    
+    st.write("### Collection 1: Dynamic Styles (1-20)")
+    for row in range(4):
+        cols = st.columns(5)
+        for col in range(5):
+            idx = (row * 5) + col
+            item = st.session_state.generated_images[idx]
+            with cols[col]:
+                st.image(item["data"], caption=item["caption"], use_container_width=True)
+                st.download_button("Download", data=item["data"], file_name=item["filename"], mime="image/png", key=f"dl_a_{idx}")
+
+    st.write("### Collection 2: Curated Themes (21-40)")
+    for row in range(4):
+        cols = st.columns(5)
+        for col in range(5):
+            idx = 20 + (row * 5) + col
+            item = st.session_state.generated_images[idx]
+            with cols[col]:
+                st.image(item["data"], caption=item["caption"], use_container_width=True)
+                st.download_button("Download", data=item["data"], file_name=item["filename"], mime="image/png", key=f"dl_b_{idx}")
