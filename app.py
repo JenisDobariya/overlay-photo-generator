@@ -281,14 +281,14 @@ def generate_curated_theme_frame(company_name, theme, text_placement, w, h):
 # STREAMLIT UI: 40 IMAGES WITH ZIP DOWNLOAD
 # ==========================================
 st.set_page_config(page_title="Mega 40-Frame Generator", layout="wide")
-st.title("✨ Mega Studio Agent (40 Frames)")
+st.title("✨ Mega Frame Photo layout Ai Agent")
 
 # Set up memory (Session State) to hold the 40 generated images
 if 'generated_images' not in st.session_state:
     st.session_state.generated_images = []
 
 size_choice = st.radio("Select Frame Orientation:", ["Portrait (1200 x 1800)", "Landscape (1800 x 1200)"], horizontal=True)
-company_name = st.text_input("Enter Company Name", "STREET ORIGINS")
+company_name = st.text_input("Enter Company Name", "")
 
 if st.button("Generate All 40 Designs"):
     if company_name:
