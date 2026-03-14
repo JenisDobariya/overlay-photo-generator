@@ -7,6 +7,8 @@ import io
 import zipfile
 import requests
 import difflib
+import os
+import urllib.request
 from google import genai
 from google.genai import types
 import firebase_admin
@@ -28,7 +30,6 @@ def init_firebase():
             cred_dict = dict(st.secrets["firebase"])
             cred = credentials.Certificate(cred_dict)
             
-            # Realtime Database requires the databaseURL to be passed during initialization!
             firebase_admin.initialize_app(cred, {
                 'databaseURL': st.secrets["firebase"]["databaseURL"]
             })
@@ -37,7 +38,6 @@ def init_firebase():
             st.stop()
     return True
 
-# Run the initialization
 init_firebase()
 
 # --- STEP 1: UTILITIES & AI ---
@@ -50,33 +50,34 @@ def get_color_variants(hex_color):
     return [to_hex(rgb), to_hex(shade), to_hex(tint)]
 
 def process_logo_logic(uploaded_file):
-    """Simply opens the image, resizes it, and ensures it has an alpha channel."""
     input_image = Image.open(uploaded_file)
     input_image.thumbnail((1200, 1200), Image.LANCZOS)
     return input_image.convert("RGBA")
 
-# --- SERVER-SAFE FONT LOADER ---
-def load_server_safe_font(size):
-    """Tries multiple font paths to guarantee text resizing works on Linux cloud servers."""
-    font_paths = [
-        "arialbd.ttf", "arial.ttf", # Windows/Mac
-        "DejaVuSans-Bold.ttf", "DejaVuSans.ttf", # Common Linux
-        "LiberationSans-Bold.ttf", "LiberationSans-Regular.ttf", # Common Linux
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", # Hardcoded Linux path
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" # Hardcoded Linux path
-    ]
-    for path in font_paths:
+# --- BULLETPROOF FONT LOADER ---
+@st.cache_data(show_spinner=False)
+def get_bulletproof_font(size):
+    """Downloads a real font if the server doesn't have one, guaranteeing it can be resized."""
+    font_filename = "Roboto-Bold.ttf"
+    
+    # If the font file isn't on the server yet, download it from Google's open source repo
+    if not os.path.exists(font_filename):
         try:
-            return ImageFont.truetype(path, int(size))
-        except IOError:
-            continue
-    # Fallback (Note: load_default ignores size, but prevents the app from crashing)
-    return ImageFont.load_default()
+            font_url = "https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Bold.ttf"
+            urllib.request.urlretrieve(font_url, font_filename)
+        except Exception as e:
+            st.warning("Could not download font. Using default (unresizable).")
+            return ImageFont.load_default()
+            
+    # Now load the guaranteed TTF file with your custom size
+    try:
+        return ImageFont.truetype(font_filename, int(size))
+    except Exception:
+        return ImageFont.load_default()
 
 # --- REALTIME DATABASE CACHE LOGIC ---
 @st.cache_data(ttl=300, show_spinner=False)
 def load_category_cache():
-    """Fetches all previously searched categories from Firebase Realtime Database."""
     cache = {}
     try:
         ref = db.reference('category_cache')
@@ -88,7 +89,6 @@ def load_category_cache():
     return cache
 
 def save_category_to_cache(category_key, keywords):
-    """Saves a newly searched category permanently to Firebase Realtime Database."""
     try:
         ref = db.reference('category_cache')
         ref.child(category_key).set(keywords)
@@ -96,7 +96,6 @@ def save_category_to_cache(category_key, keywords):
         st.warning(f"Failed to save to Realtime Database: {e}")
 
 def get_ai_keywords(category_name):
-    """Hits Firebase first (handling typos). If missing, hits Gemini and saves to Firebase."""
     if not category_name or category_name.strip() == "":
         return []
         
@@ -266,8 +265,8 @@ def generate_branded_frame(company_name, brand_text_color, text_size, text_pos, 
 
     draw = ImageDraw.Draw(base)
     
-    # --- USE THE SERVER-SAFE FONT LOADER ---
-    font = load_server_safe_font(text_size)
+    # --- USE THE BULLETPROOF FONT ENGINE HERE ---
+    font = get_bulletproof_font(text_size)
 
     zones = {
         "Top Left": [], "Top Middle": [], "Top Right": [],
@@ -355,7 +354,6 @@ with left_panel:
         st.markdown("---")
         st.write("🎨 **Background & Category**")
         
-        # Load from Realtime Database
         saved_cache = load_category_cache()
         category_options = ["➕ Add New Category"] + [c.title() for c in sorted(list(saved_cache.keys()))]
         
