@@ -16,7 +16,6 @@ from firebase_admin import credentials, db
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     PIXABAY_API_KEY = st.secrets["PIXABAY_API_KEY"]
-
 except KeyError:
     st.error("🚨 Missing API Keys! Please configure GEMINI_API_KEY and PIXABAY_API_KEY in Streamlit Secrets.")
     st.stop()
@@ -42,11 +41,6 @@ def init_firebase():
 init_firebase()
 
 # --- STEP 1: UTILITIES & AI ---
-@st.cache_resource
-def get_rembg_session():
-    from rembg import new_session
-    return new_session()
-
 def get_color_variants(hex_color):
     hex_color = hex_color.lstrip('#')
     rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
@@ -55,16 +49,29 @@ def get_color_variants(hex_color):
     def to_hex(c): return '#%02x%02x%02x' % c
     return [to_hex(rgb), to_hex(shade), to_hex(tint)]
 
-def process_logo_logic(uploaded_file, should_remove_bg):
+def process_logo_logic(uploaded_file):
+    """Simply opens the image, resizes it, and ensures it has an alpha channel."""
     input_image = Image.open(uploaded_file)
     input_image.thumbnail((1200, 1200), Image.LANCZOS)
-    if should_remove_bg:
-        from rembg import remove
-        session = get_rembg_session()
-        output_image = remove(input_image, session=session)
-    else:
-        output_image = input_image.convert("RGBA")
-    return output_image
+    return input_image.convert("RGBA")
+
+# --- SERVER-SAFE FONT LOADER ---
+def load_server_safe_font(size):
+    """Tries multiple font paths to guarantee text resizing works on Linux cloud servers."""
+    font_paths = [
+        "arialbd.ttf", "arial.ttf", # Windows/Mac
+        "DejaVuSans-Bold.ttf", "DejaVuSans.ttf", # Common Linux
+        "LiberationSans-Bold.ttf", "LiberationSans-Regular.ttf", # Common Linux
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", # Hardcoded Linux path
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" # Hardcoded Linux path
+    ]
+    for path in font_paths:
+        try:
+            return ImageFont.truetype(path, int(size))
+        except IOError:
+            continue
+    # Fallback (Note: load_default ignores size, but prevents the app from crashing)
+    return ImageFont.load_default()
 
 # --- REALTIME DATABASE CACHE LOGIC ---
 @st.cache_data(ttl=300, show_spinner=False)
@@ -72,7 +79,6 @@ def load_category_cache():
     """Fetches all previously searched categories from Firebase Realtime Database."""
     cache = {}
     try:
-        # Reference the root 'category_cache' node
         ref = db.reference('category_cache')
         data = ref.get()
         if data:
@@ -85,7 +91,6 @@ def save_category_to_cache(category_key, keywords):
     """Saves a newly searched category permanently to Firebase Realtime Database."""
     try:
         ref = db.reference('category_cache')
-        # Add the new category as a child node with the list of keywords
         ref.child(category_key).set(keywords)
     except Exception as e:
         st.warning(f"Failed to save to Realtime Database: {e}")
@@ -260,8 +265,9 @@ def generate_branded_frame(company_name, brand_text_color, text_size, text_pos, 
     base.putalpha(mask)
 
     draw = ImageDraw.Draw(base)
-    try: font = ImageFont.truetype("arialbd.ttf", int(text_size))
-    except: font = ImageFont.load_default()
+    
+    # --- USE THE SERVER-SAFE FONT LOADER ---
+    font = load_server_safe_font(text_size)
 
     zones = {
         "Top Left": [], "Top Middle": [], "Top Right": [],
@@ -368,15 +374,14 @@ with left_panel:
     with c2:
         st.write("🖼️ **Logo Center**")
         uploaded_logos = st.file_uploader("Upload Logos", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
-        remove_bg_opt = st.checkbox("AI BG Removal", value=False)
         
         active_logos = []
         if uploaded_logos:
             for i, file in enumerate(uploaded_logos):
-                cache_key = f"{file.name}_{remove_bg_opt}"
+                cache_key = file.name
                 if cache_key not in st.session_state.logo_cache:
                     with st.spinner(f"Processing {file.name}..."):
-                        clean_img = process_logo_logic(file, remove_bg_opt)
+                        clean_img = process_logo_logic(file)
                         st.session_state.logo_cache[cache_key] = clean_img
                 
                 with st.expander(f"⚙️ {file.name} Settings", expanded=True):
