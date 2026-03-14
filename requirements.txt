@@ -1,7 +1,6 @@
 streamlit
 Pillow
 numpy
-rembg
 google-genai
 requests
 firebase-admin
