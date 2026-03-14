@@ -7,7 +7,6 @@ import io
 import zipfile
 import requests
 import difflib
-from rembg import remove, new_session
 from google import genai
 from google.genai import types
 import firebase_admin
@@ -17,6 +16,7 @@ from firebase_admin import credentials, db
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     PIXABAY_API_KEY = st.secrets["PIXABAY_API_KEY"]
+
 except KeyError:
     st.error("🚨 Missing API Keys! Please configure GEMINI_API_KEY and PIXABAY_API_KEY in Streamlit Secrets.")
     st.stop()
@@ -44,6 +44,7 @@ init_firebase()
 # --- STEP 1: UTILITIES & AI ---
 @st.cache_resource
 def get_rembg_session():
+    from rembg import new_session
     return new_session()
 
 def get_color_variants(hex_color):
@@ -58,6 +59,7 @@ def process_logo_logic(uploaded_file, should_remove_bg):
     input_image = Image.open(uploaded_file)
     input_image.thumbnail((1200, 1200), Image.LANCZOS)
     if should_remove_bg:
+        from rembg import remove
         session = get_rembg_session()
         output_image = remove(input_image, session=session)
     else:
@@ -65,6 +67,7 @@ def process_logo_logic(uploaded_file, should_remove_bg):
     return output_image
 
 # --- REALTIME DATABASE CACHE LOGIC ---
+@st.cache_data(ttl=300, show_spinner=False)
 def load_category_cache():
     """Fetches all previously searched categories from Firebase Realtime Database."""
     cache = {}
