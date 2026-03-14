@@ -1,31 +1,147 @@
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 import numpy as np
 import random
 import math
 import io
 import zipfile
-import itertools
+import requests
+import difflib
+from rembg import remove, new_session
+from google import genai
+from google.genai import types
+import firebase_admin
+from firebase_admin import credentials, db
 
-# ==========================================
-# ENGINE A: DYNAMIC PREMIUM ENGINE (20 IMAGES)
-# ==========================================
-class PremiumPalettes:
-    @staticmethod
-    def get_all_palettes():
-        # Returning all palettes to guarantee unique combinations
-        return [
-            ["#141E30", "#243B55", "#FFD700", "#FF8C00"], # Luxury Night & Gold
-            ["#2c3e50", "#3498db", "#e74c3c", "#f1c40f"], # Corporate Pop
-            ["#ff9a9e", "#fecfef", "#a18cd1", "#fbc2eb"], # Soft Pastel
-            ["#0f2027", "#203a43", "#2c5364", "#00b4d8"], # Deep Ocean
-            ["#111111", "#222222", "#ff003c", "#f0f0f0"], # Urban Grunge
-            ["#41295a", "#2F0743", "#f12711", "#f5af19"], # Neon Sunset
-            ["#ece9e6", "#ffffff", "#8e9eab", "#283048"], # Minimalist
-            ["#2E1437", "#4A1C40", "#F2D0A9", "#E63946"], # Memphis Retro
-        ]
+# --- SECURE CLOUD INITIALIZATION ---
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    PIXABAY_API_KEY = st.secrets["PIXABAY_API_KEY"]
+except KeyError:
+    st.error("🚨 Missing API Keys! Please configure GEMINI_API_KEY and PIXABAY_API_KEY in Streamlit Secrets.")
+    st.stop()
 
-class PremiumEngine:
+@st.cache_resource
+def init_firebase():
+    """Initializes Firebase Realtime Database securely using Streamlit Secrets."""
+    if not firebase_admin._apps:
+        try:
+            cred_dict = dict(st.secrets["firebase"])
+            cred = credentials.Certificate(cred_dict)
+            
+            # Realtime Database requires the databaseURL to be passed during initialization!
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': st.secrets["firebase"]["databaseURL"]
+            })
+        except Exception as e:
+            st.error(f"🚨 Failed to initialize Firebase: {e}. Check your Streamlit Secrets formatting.")
+            st.stop()
+    return True
+
+# Run the initialization
+init_firebase()
+
+# --- STEP 1: UTILITIES & AI ---
+@st.cache_resource
+def get_rembg_session():
+    return new_session()
+
+def get_color_variants(hex_color):
+    hex_color = hex_color.lstrip('#')
+    rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    shade = tuple(max(0, c - 60) for c in rgb)
+    tint = tuple(min(255, c + 60) for c in rgb)
+    def to_hex(c): return '#%02x%02x%02x' % c
+    return [to_hex(rgb), to_hex(shade), to_hex(tint)]
+
+def process_logo_logic(uploaded_file, should_remove_bg):
+    input_image = Image.open(uploaded_file)
+    input_image.thumbnail((1200, 1200), Image.LANCZOS)
+    if should_remove_bg:
+        session = get_rembg_session()
+        output_image = remove(input_image, session=session)
+    else:
+        output_image = input_image.convert("RGBA")
+    return output_image
+
+# --- REALTIME DATABASE CACHE LOGIC ---
+def load_category_cache():
+    """Fetches all previously searched categories from Firebase Realtime Database."""
+    cache = {}
+    try:
+        # Reference the root 'category_cache' node
+        ref = db.reference('category_cache')
+        data = ref.get()
+        if data:
+            cache = data
+    except Exception as e:
+        st.warning(f"Failed to load cache from Realtime Database: {e}")
+    return cache
+
+def save_category_to_cache(category_key, keywords):
+    """Saves a newly searched category permanently to Firebase Realtime Database."""
+    try:
+        ref = db.reference('category_cache')
+        # Add the new category as a child node with the list of keywords
+        ref.child(category_key).set(keywords)
+    except Exception as e:
+        st.warning(f"Failed to save to Realtime Database: {e}")
+
+def get_ai_keywords(category_name):
+    """Hits Firebase first (handling typos). If missing, hits Gemini and saves to Firebase."""
+    if not category_name or category_name.strip() == "":
+        return []
+        
+    category_key = category_name.lower().strip()
+    cache = load_category_cache()
+    
+    existing_keys = list(cache.keys())
+    close_matches = difflib.get_close_matches(category_key, existing_keys, n=1, cutoff=0.8)
+    
+    if close_matches:
+        matched_key = close_matches[0]
+        if matched_key != category_key:
+            st.toast(f"💡 Typo corrected: '{category_key}' matched with database entry '{matched_key}'!")
+        return cache[matched_key]
+        
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        system_instruction = """
+        Output ONLY a single line of comma-separated keywords representing physical objects for the category.
+        Provide exactly 12 highly visual items. No descriptions. Keep words simple (e.g. 'wedding ring').
+        """
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=f"Category: {category_key}",
+            config=types.GenerateContentConfig(system_instruction=system_instruction, temperature=0.2)
+        )
+        items_list = [item.strip() for item in response.text.split(',')]
+        
+        save_category_to_cache(category_key, items_list)
+        st.toast(f"☁️ Saved new category to Firebase Realtime Database: '{category_key}'")
+        return items_list
+        
+    except Exception as e:
+        st.warning(f"Gemini API Error: {e}")
+        return []
+
+@st.cache_data(show_spinner=False)
+def fetch_pixabay_stickers(keywords):
+    stickers_bytes = []
+    for query in keywords:
+        url = f"https://pixabay.com/api/?key={PIXABAY_API_KEY}&q={requests.utils.quote(query)}&image_type=vector&colors=transparent&per_page=3"
+        try:
+            data = requests.get(url).json()
+            if data.get('hits') and len(data['hits']) > 0:
+                image_url = data['hits'][0]['webformatURL']
+                img_data = requests.get(image_url).content
+                stickers_bytes.append(img_data)
+        except Exception:
+            continue
+    return stickers_bytes
+
+# --- STEP 2: HIGH-IMPACT DESIGN ENGINE ---
+class CategoryObjectEngine:
     @staticmethod
     def create_gradient(c1, c2, w, h):
         base = Image.new('RGB', (w, h), c1)
@@ -36,352 +152,315 @@ class PremiumEngine:
         base.paste(top, (0, 0), mask)
         return base
 
-    @staticmethod
-    def add_noise(img, intensity=10):
-        arr = np.array(img, dtype=np.int16)
-        noise = np.random.normal(0, intensity, arr.shape)
-        arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
-        return Image.fromarray(arr).convert('RGBA')
+    def draw_sparkle(self, draw, x, y, size, color):
+        half, core = size // 2, max(2, size // 8)
+        pts = [(x, y - half), (x + core, y - core), (x + half, y), (x + core, y + core),
+               (x, y + half), (x - core, y + core), (x - half, y), (x - core, y - core)]
+        draw.polygon(pts, fill=color)
 
-    def draw_bokeh(self, draw, colors, w, h):
-        for _ in range(int((w*h)/25000)):
-            x, y = random.randint(-200, w), random.randint(-200, h)
-            r = random.randint(100, 400)
-            overlay = Image.new('RGBA', (w, h), (0,0,0,0))
-            ImageDraw.Draw(overlay).ellipse([x, y, x+r, y+r], fill=random.choice(colors) + "44") 
-            draw.im.paste(overlay.im, (0,0, w, h))
+    def draw_hexagon(self, draw, x, y, size, color, fill=True):
+        r = size // 2
+        pts = [(x + r * math.cos(math.radians(angle)), y + r * math.sin(math.radians(angle))) for angle in range(0, 360, 60)]
+        if fill: draw.polygon(pts, fill=color)
+        else: draw.polygon(pts, outline=color, width=max(1, size//15))
 
-    def draw_memphis(self, draw, colors, w, h):
-        for _ in range(int((w*h)/35000)):
-            x, y = random.randint(0, w), random.randint(0, h)
-            shape = random.choice(["circle", "triangle", "zigzag", "dots"])
-            color = random.choice(colors)
-            if shape == "circle": draw.ellipse([x, y, x+random.randint(20, 100), y+random.randint(20, 100)], outline=color, width=8)
-            elif shape == "triangle":
-                s = random.randint(40, 150)
-                draw.polygon([(x, y), (x+s, y+s), (x-s, y+s)], fill=color)
-            elif shape == "zigzag": draw.line([(x, y), (x+40, y-40), (x+80, y), (x+120, y-40)], fill=color, width=10, joint="curve")
-            elif shape == "dots":
-                for dx in range(0, 100, 20):
-                    for dy in range(0, 100, 20): draw.ellipse([x+dx, y+dy, x+dx+8, y+dy+8], fill=color)
+    def draw_chevron(self, draw, x, y, size, color):
+        w, h = size, size // 2
+        thick = max(4, size // 4)
+        pts = [(x, y), (x + w, y + h//2), (x, y + h), (x + thick, y + h), (x + w + thick, y + h//2), (x + thick, y)]
+        draw.polygon(pts, fill=color)
 
-    def draw_halftone(self, draw, colors, w, h):
-        c = random.choice(colors)
-        for x in range(0, w, 40):
-            for y in range(0, h, 40):
-                r = random.randint(2, 12)
-                draw.ellipse([x, y, x+r, y+r], fill=c)
+    def draw_leaf(self, draw, x, y, size, color):
+        draw.pieslice([x, y, x+size, y+size], 180, 270, fill=color)
+        draw.pieslice([x, y, x+size, y+size], 0, 90, fill=color)
+        draw.polygon([(x+size//2, y), (x+size, y+size//2), (x+size//2, y+size), (x, y+size//2)], fill=color)
 
-    def draw_cyber(self, draw, colors, w, h):
-        c1, c2 = colors[0], colors[1]
-        for x in range(0, w, 80): draw.line([x, 0, x, h], fill=c1, width=2)
-        for y in range(0, h, 80): draw.line([0, y, w, y], fill=c1, width=2)
-        for _ in range(40):
-            nx, ny = random.randint(0, w//80)*80, random.randint(0, h//80)*80
-            draw.ellipse([nx-6, ny-6, nx+6, ny+6], fill=c2)
-
-    def draw_liquid(self, draw, colors, w, h):
-        for _ in range(8):
-            x = random.choice([-100, w//2, w+100])
-            y = random.choice([-100, h//2, h+100])
-            r = random.randint(300, 800)
-            draw.ellipse([x-r, y-r, x+r, y+r], fill=random.choice(colors))
-
-    def draw_stripes(self, draw, colors, w, h):
-        c = random.choice(colors)
-        for y in range(-h, h*2, 100):
-            draw.line([0, y, w, y+w], fill=c, width=35)
-
-def generate_premium_frame(company_name, theme_colors, text_placement, style_type, w, h):
-    engine = PremiumEngine()
-    if w == 1200 and h == 1800:
-        margin_top, margin_bottom, margin_sides = 200, 200, 90
-    else: 
-        margin_top, margin_bottom, margin_sides = 150, 150, 180
+    def draw_abstract_objects(self, draw, brand_palette, w, h, category):
+        cat = category.lower()
+        full_harmonic = []
+        for color in brand_palette:
+            full_harmonic.extend(get_color_variants(color))
         
-    empty_rect = (margin_sides, margin_top, w - margin_sides, h - margin_bottom)
+        for _ in range(random.randint(40, 70)):
+            x, y = random.randint(0, w), random.randint(0, h)
+            size = random.randint(30, 180)
+            color = random.choice(full_harmonic) + random.choice(["66", "99", "CC", "FF"])
+            
+            if any(k in cat for k in ["luxury", "wedding", "beauty", "premium"]):
+                if random.random() > 0.4: self.draw_sparkle(draw, x, y, size, color)
+                else: draw.ellipse([x, y, x+size, y+size], outline=color, width=2)
+            
+            elif any(k in cat for k in ["tech", "cyber", "corporate", "data", "it"]):
+                if random.random() > 0.5: self.draw_hexagon(draw, x, y, size, color, fill=random.choice([True, False]))
+                else:
+                    draw.rectangle([x, y, x+size, y+max(4, size//10)], fill=color)
+                    draw.ellipse([x-4, y-4, x+4, y+4], fill=color)
+            
+            elif any(k in cat for k in ["sports", "fitness", "gym", "auto", "speed"]):
+                if random.random() > 0.5: self.draw_chevron(draw, x, y, size, color)
+                else: draw.line([x, y, x+size*2, y], fill=color, width=max(2, size//5))
+            
+            elif any(k in cat for k in ["party", "fun", "kids", "event"]):
+                shape_type = random.choice(["circle", "triangle", "confetti"])
+                if shape_type == "circle": draw.ellipse([x, y, x+size, y+size], fill=color)
+                elif shape_type == "triangle": draw.polygon([(x, y-size//2), (x+size//2, y+size//2), (x-size//2, y+size//2)], fill=color)
+                else: draw.regular_polygon((x, y, size//3), n_sides=4, rotation=random.randint(0, 360), fill=color)
+            
+            elif any(k in cat for k in ["food", "cafe", "restaurant", "organic", "health"]):
+                if random.random() > 0.5: self.draw_leaf(draw, x, y, size, color)
+                else:
+                    draw.ellipse([x, y, x+size, y+size], fill=color)
+                    if random.random() > 0.5: draw.ellipse([x+10, y+10, x+size-10, y+size-10], outline="#FFFFFF66", width=2)
+            
+            else:
+                draw.regular_polygon((x, y, size//2), n_sides=random.randint(3, 8), rotation=random.randint(0,360), fill=color)
+
+def generate_branded_frame(company_name, brand_text_color, text_size, text_pos, text_order, category, logos_list, use_ai_stickers, ai_stickers, palette, w, h, mt, mb, ms, bg_style, pattern_style, radius_val):
+    engine = CategoryObjectEngine()
+    empty_rect = (ms, mt, w - ms, h - mb)
+    p_copy = list(palette) if palette else ["#000000", "#FFFFFF"]
+    random.shuffle(p_copy)
     
-    base = engine.create_gradient(theme_colors[0], theme_colors[1], w, h)
-    base = engine.add_noise(base, intensity=12)
+    c1 = p_copy[0]
+    if bg_style == "Gradient":
+        c2 = p_copy[1] if len(p_copy) > 1 else get_color_variants(p_copy[0])[1]
+        base = engine.create_gradient(c1, c2, w, h)
+    else:
+        base = Image.new('RGB', (w, h), c1)
+        
     draw = ImageDraw.Draw(base, "RGBA")
     
-    art_colors = [theme_colors[2], theme_colors[3], "#ffffff", "#000000"]
-    if style_type == "Bokeh": engine.draw_bokeh(draw, art_colors, w, h)
-    elif style_type == "Memphis": engine.draw_memphis(draw, art_colors, w, h)
-    elif style_type == "Halftone": engine.draw_halftone(draw, art_colors, w, h)
-    elif style_type == "CyberTech": engine.draw_cyber(draw, art_colors, w, h)
-    elif style_type == "Liquid": engine.draw_liquid(draw, art_colors, w, h)
-    elif style_type == "RetroStripes": engine.draw_stripes(draw, art_colors, w, h)
-
-    shadow_offset = 20
-    shadow_layer = Image.new('RGBA', (w, h), (0,0,0,0))
-    shadow_draw = ImageDraw.Draw(shadow_layer)
-    shadow_draw.rounded_rectangle((empty_rect[0]+shadow_offset, empty_rect[1]+shadow_offset, empty_rect[2]+shadow_offset, empty_rect[3]+shadow_offset), radius=60, fill=(0, 0, 0, 150))
-    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=25))
-    base = Image.alpha_composite(base, shadow_layer)
-    draw = ImageDraw.Draw(base)
-
-    mask = Image.new('L', (w, h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle(empty_rect, radius=60, fill=255)
-    base.paste((255, 255, 255, 255), (0, 0), mask)
-    
-    if random.choice([True, False]):
-        draw.rounded_rectangle(empty_rect, radius=60, outline=theme_colors[2], width=5)
-
-    try: font = ImageFont.truetype("arialbd.ttf", 95) 
-    except: font = ImageFont.load_default(size=85)
-    text_str = company_name.upper()
-
-    if text_placement in ["Top", "Both"]:
-        y_top = margin_top // 2 
-        draw.text((w/2 + 4, y_top + 4), text_str, fill=(0,0,0,180), font=font, anchor="mm")
-        draw.text((w/2, y_top), text_str, fill="#FFFFFF", font=font, anchor="mm", stroke_width=3, stroke_fill=theme_colors[3])
-
-    if text_placement in ["Bottom", "Both"]:
-        y_bottom = h - (margin_bottom // 2)
-        draw.text((w/2 + 4, y_bottom + 4), text_str, fill=(0,0,0,180), font=font, anchor="mm")
-        draw.text((w/2, y_bottom), text_str, fill="#FFFFFF", font=font, anchor="mm", stroke_width=3, stroke_fill=theme_colors[3])
-
-    return base
-
-# ==========================================
-# ENGINE B: THE CURATED 20 THEMES ENGINE
-# ==========================================
-THEMES = [
-    {"name": "Neon_Cyberpunk", "bg": (20, 20, 25), "c1": (255, 0, 255), "c2": (0, 255, 255), "pattern": "grid", "asset": "tech_lines"},
-    {"name": "Kawaii_Pastel", "bg": (255, 228, 225), "c1": (176, 224, 230), "c2": (255, 250, 205), "pattern": "polka_dots", "asset": "stars"},
-    {"name": "Luxury_Gold", "bg": (15, 15, 15), "c1": (212, 175, 55), "c2": (255, 223, 0), "pattern": "none", "asset": "elegant_dust"},
-    {"name": "Forest_Nature", "bg": (240, 255, 240), "c1": (34, 139, 34), "c2": (154, 205, 50), "pattern": "leaves_abstract", "asset": "bubbles"},
-    {"name": "Ocean_Depth", "bg": (10, 25, 47), "c1": (0, 191, 255), "c2": (0, 128, 128), "pattern": "sine_waves", "asset": "bubbles"},
-    {"name": "Pop_Art", "bg": (255, 255, 0), "c1": (255, 0, 0), "c2": (0, 0, 255), "pattern": "halftone", "asset": "comic_splats"},
-    {"name": "Synthwave_80s", "bg": (43, 0, 60), "c1": (242, 34, 255), "c2": (255, 124, 0), "pattern": "grid", "asset": "stars"},
-    {"name": "Minimalist_Mono", "bg": (240, 240, 240), "c1": (100, 100, 100), "c2": (50, 50, 50), "pattern": "none", "asset": "geometry_shards"},
-    {"name": "Tropical_Vibe", "bg": (255, 127, 80), "c1": (255, 215, 0), "c2": (255, 20, 147), "pattern": "polka_dots", "asset": "sunburst"},
-    {"name": "Midnight_Magic", "bg": (25, 25, 112), "c1": (238, 130, 238), "c2": (255, 215, 0), "pattern": "none", "asset": "stars"},
-    {"name": "Candy_Store", "bg": (255, 182, 193), "c1": (64, 224, 208), "c2": (255, 255, 255), "pattern": "stripes", "asset": "bubbles"},
-    {"name": "Coffee_House", "bg": (245, 222, 179), "c1": (139, 69, 19), "c2": (205, 133, 63), "pattern": "halftone", "asset": "splats"},
-    {"name": "SciFi_Hologram", "bg": (0, 0, 0), "c1": (0, 255, 255), "c2": (255, 255, 255), "pattern": "grid", "asset": "tech_lines"},
-    {"name": "Retro_70s", "bg": (244, 164, 96), "c1": (139, 69, 19), "c2": (218, 165, 32), "pattern": "sine_waves", "asset": "bubbles"},
-    {"name": "Velvet_Royal", "bg": (75, 0, 130), "c1": (220, 20, 60), "c2": (218, 165, 32), "pattern": "none", "asset": "elegant_dust"},
-    {"name": "Fresh_Spring", "bg": (255, 255, 255), "c1": (152, 251, 152), "c2": (240, 230, 140), "pattern": "polka_dots", "asset": "splats"},
-    {"name": "Lava_Lamp", "bg": (139, 0, 0), "c1": (255, 69, 0), "c2": (255, 140, 0), "pattern": "none", "asset": "large_blobs"},
-    {"name": "Winter_Ice", "bg": (240, 248, 255), "c1": (173, 216, 230), "c2": (192, 192, 192), "pattern": "stripes", "asset": "geometry_shards"},
-    {"name": "Graffiti_Alley", "bg": (40, 40, 40), "c1": (255, 20, 147), "c2": (0, 255, 0), "pattern": "halftone", "asset": "comic_splats"},
-    {"name": "Abstract_Art", "bg": (245, 245, 245), "c1": (255, 99, 71), "c2": (70, 130, 180), "pattern": "none", "asset": "geometry_shards"}
-]
-
-def draw_pattern(draw, width, height, theme):
-    c1, c2 = theme["c1"], theme["c2"]
-    alpha_c1, alpha_c2 = c1 + (100,), c2 + (80,)
-
-    if theme["pattern"] == "grid":
-        for i in range(0, width, 50): draw.line([(i, 0), (i, height)], fill=alpha_c1, width=2)
-        for i in range(0, height, 50): draw.line([(0, i), (width, i)], fill=alpha_c1, width=2)
-    elif theme["pattern"] == "polka_dots":
-        for x in range(0, width, 60):
-            for y in range(0, height, 60):
-                offset_x = 30 if (y//60)%2 == 0 else 0
-                r = random.randint(5, 15)
-                draw.ellipse([x+offset_x-r, y-r, x+offset_x+r, y+r], fill=alpha_c2)
-    elif theme["pattern"] == "halftone":
-        for x in range(0, width, 30):
-            for y in range(0, height, 30):
-                draw.ellipse([x-(r:=random.randint(2, 12)), y-r, x+r, y+r], fill=alpha_c1)
-    elif theme["pattern"] == "stripes":
-        for x in range(-height, width, 80): draw.line([(x, 0), (x+height, height)], fill=alpha_c1, width=20)
-    elif theme["pattern"] == "sine_waves":
-        for _ in range(10):
-            amp, freq, y_base = random.randint(20, 80), random.uniform(0.005, 0.015), random.randint(0, height)
-            pts = [(x, y_base + math.sin(x*freq)*amp) for x in range(0, width, 10)]
-            if len(pts)>1: draw.line(pts, fill=alpha_c2, width=15)
-
-def draw_assets(draw, width, height, theme):
-    c1, c2 = theme["c1"], theme["c2"]
-    margin_x, margin_y = int(width * 0.1), int(height * 0.1)
-    
-    for _ in range(random.randint(15, 30)):
-        x = random.randint(0, width) if random.random() > 0.5 else random.choice([random.randint(0, margin_x), random.randint(width-margin_x, width)])
-        y = random.choice([random.randint(0, margin_y), random.randint(height-margin_y, height)]) if random.random() > 0.5 else random.randint(0, height)
-        size = random.randint(30, 150)
+    if pattern_style == "With Design":
+        engine.draw_abstract_objects(draw, p_copy, w, h, category)
         
-        if theme["asset"] == "stars":
-            draw.polygon([(x, y-size), (x+size/4, y-size/4), (x+size, y), (x+size/4, y+size/4), (x, y+size), (x-size/4, y+size/4), (x-size, y), (x-size/4, y-size/4)], fill=c1+(150,))
-        elif theme["asset"] == "bubbles":
-            draw.ellipse([x-size, y-size, x+size, y+size], outline=c2+(150,), width=8)
-            draw.ellipse([x-size*0.8, y-size*0.8, x+size*0.8, y+size*0.8], fill=c1+(50,))
-        elif theme["asset"] == "comic_splats":
-            pts = [(x + (size * random.uniform(0.5, 1.5)) * math.cos(math.radians(a)), y + (size * random.uniform(0.5, 1.5)) * math.sin(math.radians(a))) for a in range(0, 360, 30)]
-            draw.polygon(pts, fill=random.choice([c1, c2])+(180,))
-        elif theme["asset"] == "geometry_shards":
-            sides = random.randint(3, 5)
-            pts = [(x + size * math.cos(math.radians(i * (360/sides) + random.randint(0, 90))), y + size * math.sin(math.radians(i * (360/sides) + random.randint(0, 90)))) for i in range(sides)]
-            draw.polygon(pts, fill=random.choice([c1, c2])+(200,))
-        elif theme["asset"] == "tech_lines":
-            draw.line([(x, y), (x+size, y), (x+size, y+size/2)], fill=c1+(180,), width=8)
-            draw.ellipse([x-10, y-10, x+10, y+10], fill=c2+(200,))
-        elif theme["asset"] == "elegant_dust":
-            for _ in range(5): draw.ellipse([x+(dx:=random.randint(-50, 50))-(r:=random.randint(2, 8)), y+(dy:=random.randint(-50, 50))-r, x+dx+r, y+dy+r], fill=c2+(180,))
-        elif theme["asset"] == "large_blobs":
-            draw.ellipse([x-size*2, y-size*2, x+size*2, y+size*2], fill=c1+(120,))
-        elif theme["asset"] == "sunburst":
-            for a in range(0, 360, 45): draw.line([(x,y), (x + size * 1.5 * math.cos(math.radians(a)), y + size * 1.5 * math.sin(math.radians(a)))], fill=c2+(100,), width=10)
+    if use_ai_stickers and ai_stickers:
+        for _ in range(random.randint(20, 35)): 
+            sticker = random.choice(ai_stickers)
+            scale = random.uniform(0.3, 1.2)
+            new_w, new_h = max(20, int(sticker.width * scale)), max(20, int(sticker.height * scale))
+            new_w, new_h = min(new_w, 350), min(new_h, 350)
+            s_copy = sticker.copy().resize((new_w, new_h), Image.LANCZOS)
+            
+            angle = random.randint(-45, 45)
+            s_copy = s_copy.rotate(angle, expand=True, resample=Image.BICUBIC)
+            
+            r, g, b, a = s_copy.split()
+            a = a.point(lambda p: p * 0.6) 
+            s_copy.putalpha(a)
+            
+            x = random.randint(-100, w - 50)
+            y = random.randint(-100, h - 50)
+            base.paste(s_copy, (x, y), s_copy)
 
-def generate_curated_theme_frame(company_name, theme, text_placement, w, h):
-    if w == 1200 and h == 1800:
-        margin_top, margin_bottom, margin_sides = 200, 200, 90
-    else: 
-        margin_top, margin_bottom, margin_sides = 150, 150, 180
-    empty_rect = (margin_sides, margin_top, w - margin_sides, h - margin_bottom)
+    mask = Image.new('L', (w, h), 255)
+    ImageDraw.Draw(mask).rounded_rectangle(empty_rect, radius=radius_val, fill=0)
+    base.putalpha(mask)
 
-    bg_color = '#%02x%02x%02x' % theme["bg"]
-    c2_color = '#%02x%02x%02x' % theme["c2"]
-    
-    base = PremiumEngine.create_gradient(bg_color, c2_color, w, h)
-    draw = ImageDraw.Draw(base, 'RGBA')
-    draw_pattern(draw, w, h, theme)
-    draw_assets(draw, w, h, theme)
-    base = PremiumEngine.add_noise(base, intensity=12)
-    base = base.filter(ImageFilter.SMOOTH_MORE)
-
-    shadow_offset = 20
-    shadow_layer = Image.new('RGBA', (w, h), (0,0,0,0))
-    shadow_draw = ImageDraw.Draw(shadow_layer)
-    shadow_draw.rounded_rectangle((empty_rect[0]+shadow_offset, empty_rect[1]+shadow_offset, empty_rect[2]+shadow_offset, empty_rect[3]+shadow_offset), radius=60, fill=(0, 0, 0, 150))
-    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=25))
-    base = Image.alpha_composite(base.convert('RGBA'), shadow_layer)
     draw = ImageDraw.Draw(base)
+    try: font = ImageFont.truetype("arialbd.ttf", int(text_size))
+    except: font = ImageFont.load_default()
 
-    mask = Image.new('L', (w, h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle(empty_rect, radius=60, fill=255)
-    base.paste((255, 255, 255, 255), (0, 0), mask)
-    draw.rounded_rectangle(empty_rect, radius=60, outline=theme["c2"]+(255,), width=5)
+    zones = {
+        "Top Left": [], "Top Middle": [], "Top Right": [],
+        "Bottom Left": [], "Bottom Middle": [], "Bottom Right": []
+    }
 
-    try: font = ImageFont.truetype("arialbd.ttf", 95) 
-    except: font = ImageFont.load_default(size=85)
-    text_str = company_name.upper()
-
-    bg_r, bg_g, bg_b = theme["bg"]
-    lum = (0.299*bg_r + 0.587*bg_g + 0.114*bg_b)
-    text_color = "#FFFFFF" if lum < 128 else "#1A1A1A"
-    stroke_color = '#%02x%02x%02x' % theme["c1"]
-
-    if text_placement in ["Top", "Both"]:
-        y_top = margin_top // 2 
-        draw.text((w/2 + 4, y_top + 4), text_str, fill=(0,0,0,180), font=font, anchor="mm")
-        draw.text((w/2, y_top), text_str, fill=text_color, font=font, anchor="mm", stroke_width=3, stroke_fill=stroke_color)
-
-    if text_placement in ["Bottom", "Both"]:
-        y_bottom = h - (margin_bottom // 2)
-        draw.text((w/2 + 4, y_bottom + 4), text_str, fill=(0,0,0,180), font=font, anchor="mm")
-        draw.text((w/2, y_bottom), text_str, fill=text_color, font=font, anchor="mm", stroke_width=3, stroke_fill=stroke_color)
-
-    return base
-
-# ==========================================
-# STREAMLIT UI: 40 IMAGES WITH ZIP DOWNLOAD
-# ==========================================
-st.set_page_config(page_title="Mega 40-Frame Generator", layout="wide")
-st.title("✨ Mega Frame Photo layout Ai Agent")
-
-# Set up memory (Session State) to hold the 40 generated images
-if 'generated_images' not in st.session_state:
-    st.session_state.generated_images = []
-
-size_choice = st.radio("Select Frame Orientation:", ["Portrait (1200 x 1800)", "Landscape (1800 x 1200)"], horizontal=True)
-company_name = st.text_input("Enter Company Name", "")
-
-if st.button("Generate All 40 Designs"):
+    for l in logos_list:
+        aspect = l['img'].width / l['img'].height
+        lw, lh = int(l['size'] * aspect), int(l['size'])
+        zones[l['position']].append({'type': 'logo', 'img': l['img'], 'w': lw, 'h': lh, 'order': l['order']})
+        
     if company_name:
-        current_w, current_h = (1200, 1800) if "Portrait" in size_choice else (1800, 1200)
+        bbox = draw.textbbox((0, 0), company_name.upper(), font=font)
+        tw = bbox[2] - bbox[0]
+        zones[text_pos].append({'type': 'text', 'text': company_name.upper(), 'w': tw, 'h': int(text_size), 'order': text_order})
+
+    for zone_name, items in zones.items():
+        if not items: continue
         
-        # Clear old images
-        st.session_state.generated_images = []
+        items = sorted(items, key=lambda x: x['order'])
+        total_width = sum(item['w'] for item in items) + (20 * (len(items) - 1))
         
-        with st.spinner(f"Generating 40 unique {size_choice} designs... this takes about 10-15 seconds."):
+        target_y = mt // 2 if "Top" in zone_name else h - (mb // 2)
+        
+        if "Left" in zone_name: current_x = ms
+        elif "Right" in zone_name: current_x = w - ms - total_width
+        else: current_x = (w - total_width) // 2 
+
+        for item in items:
+            if item['type'] == 'logo':
+                l_copy = item['img'].copy().resize((item['w'], item['h']), Image.LANCZOS)
+                base.paste(l_copy, (int(current_x), int(target_y - (item['h'] // 2))), l_copy)
+            elif item['type'] == 'text':
+                draw.text((current_x, target_y), item['text'], fill=brand_text_color, font=font, anchor="lm")
             
-            # --- Guarantee Unique Combinations for Engine A ---
-            all_styles = ["Bokeh", "Memphis", "Halftone", "CyberTech", "Liquid", "RetroStripes"]
-            all_palettes = PremiumPalettes.get_all_palettes()
-            
-            # Create a list of all 48 possible style+palette combos and shuffle them
-            unique_combinations = list(itertools.product(all_styles, all_palettes))
-            random.shuffle(unique_combinations)
-            
-            # 1. Engine A (First 20 Images)
-            for i in range(20):
-                placement = "Top" if i < 5 else "Bottom" if i < 10 else random.choice(["Top", "Bottom", "Both"])
+            current_x += item['w'] + 20 
+
+    return base
+
+# --- STEP 3: STREAMLIT APP ---
+st.set_page_config(page_title="Pro Studio v12", layout="wide")
+
+st.markdown("""
+    <style>
+    div[data-testid="stButton"] button[kind="secondary"] {
+        padding: 2px 10px !important; height: 24px !important; min-height: 24px !important;
+        font-size: 12px !important; line-height: 1 !important; border-radius: 4px !important; margin-top: 5px !important;
+    }
+    div[data-testid="stButton"] button[kind="primary"] {
+        height: 50px !important; font-size: 18px !important; font-weight: 800 !important;
+        border-radius: 8px !important; letter-spacing: 1px !important;
+        background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%) !important; color: white !important;
+        border: none !important; transition: all 0.2s ease-in-out !important;
+    }
+    div[data-testid="stButton"] button[kind="primary"]:hover {
+        background: linear-gradient(135deg, #4f46e5 0%, #9333ea 100%) !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.2) !important; transform: translateY(-1px) !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+if 'all_images' not in st.session_state: st.session_state.all_images = []
+if 'brand_palette' not in st.session_state: st.session_state.brand_palette = ['#000000', '#FFFFFF']
+if 'logo_cache' not in st.session_state: st.session_state.logo_cache = {}
+
+pos_options = ["Top Middle", "Top Left", "Top Right", "Bottom Middle", "Bottom Left", "Bottom Right"]
+
+st.title("🚀 Studio Agent v12: RTDB Enabled")
+
+left_panel, right_panel = st.columns([3, 1])
+
+with left_panel:
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write("📝 **Brand Text Settings**")
+        sub_c1, sub_c2, sub_c3 = st.columns([2, 1, 1])
+        company_name = sub_c1.text_input("Brand Name", "LEAP")
+        brand_text_color = sub_c2.color_picker("Text Color", "#FFFFFF")
+        text_size = sub_c3.number_input("Text Size", value=80, min_value=10, max_value=300)
+        
+        tx_c1, tx_c2 = st.columns([2, 1])
+        text_pos = tx_c1.selectbox("Text Position", pos_options, index=0)
+        text_order = tx_c2.number_input("Text Order", value=99)
+        
+        st.markdown("---")
+        st.write("🎨 **Background & Category**")
+        
+        # Load from Realtime Database
+        saved_cache = load_category_cache()
+        category_options = ["➕ Add New Category"] + [c.title() for c in sorted(list(saved_cache.keys()))]
+        
+        selected_cat = st.selectbox("Select or Search Category", category_options)
+        
+        if selected_cat == "➕ Add New Category":
+            category_input = st.text_input("Type New Category (e.g. Real Estate, Gaming)")
+        else:
+            category_input = selected_cat
+
+        sc_bg, sc_pat = st.columns(2)
+        bg_style = sc_bg.radio("Background Style", ["Gradient", "Solid"])
+        pattern_style = sc_pat.radio("Pattern Type", ["With Design", "Without Design"])
+        use_ai_stickers = st.toggle("✨ Layer AI Smart Stickers", value=False)
+        
+    with c2:
+        st.write("🖼️ **Logo Center**")
+        uploaded_logos = st.file_uploader("Upload Logos", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+        remove_bg_opt = st.checkbox("AI BG Removal", value=False)
+        
+        active_logos = []
+        if uploaded_logos:
+            for i, file in enumerate(uploaded_logos):
+                cache_key = f"{file.name}_{remove_bg_opt}"
+                if cache_key not in st.session_state.logo_cache:
+                    with st.spinner(f"Processing {file.name}..."):
+                        clean_img = process_logo_logic(file, remove_bg_opt)
+                        st.session_state.logo_cache[cache_key] = clean_img
                 
-                # Pick guaranteed unique combo
-                style, colors = unique_combinations[i] 
-                
-                img = generate_premium_frame(company_name, colors, placement, style, current_w, current_h)
-                
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                
-                st.session_state.generated_images.append({
-                    "data": buf.getvalue(),
-                    "caption": f"Dynamic: {style} ({placement})",
-                    "filename": f"{company_name}_{style}_Dynamic_{i+1}.png",
-                    "collection": "1"
+                with st.expander(f"⚙️ {file.name} Settings", expanded=True):
+                    sc1, sc2, sc3 = st.columns(3)
+                    l_size = sc1.number_input("Size (px)", value=150, key=f"sz_{file.name}")
+                    l_order = sc2.number_input("Order", value=i, step=1, key=f"ord_{file.name}")
+                    l_pos = sc3.selectbox("Position", pos_options, index=0, key=f"pos_{file.name}")
+                    
+                active_logos.append({
+                    "img": st.session_state.logo_cache[cache_key],
+                    "size": l_size, "order": l_order, "position": l_pos
                 })
 
-            # 2. Engine B (Curated 20 Themes)
-            for i in range(20):
-                theme = THEMES[i]
-                placement = "Top" if i < 5 else "Bottom" if i < 10 else random.choice(["Top", "Bottom", "Both"])
-                img = generate_curated_theme_frame(company_name, theme, placement, current_w, current_h)
-                
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                
-                st.session_state.generated_images.append({
-                    "data": buf.getvalue(),
-                    "caption": f"{theme['name']} ({placement})",
-                    "filename": f"{company_name}_{theme['name']}_Curated_{i+1}.png",
-                    "collection": "2"
-                })
-    else:
-        st.warning("Please enter a company name.")
+    if st.session_state.brand_palette:
+        st.write("### Brand Palette")
+        p_cols = st.columns(12)
+        to_delete = None
+        for i, color in enumerate(st.session_state.brand_palette):
+            with p_cols[i]:
+                st.markdown(f'<div style="background-color:{color}; width:60px; height:60px; border-radius:10px; border:2px solid #ddd; margin:0 auto;"></div>', unsafe_allow_html=True)
+                if st.button("x", key=f"del_{i}", help="Delete", type="secondary", use_container_width=True): to_delete = i
+        
+        if to_delete is not None:
+            st.session_state.brand_palette.pop(to_delete)
+            st.rerun()
 
-# --- DISPLAY MEMORY & ZIP EXPORT LOGIC ---
-if len(st.session_state.generated_images) == 40:
-    st.success("All 40 Designs Ready! Download them individually below, or download all at once.")
-    
-    # --- CREATE ZIP FILE IN MEMORY ---
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for item in st.session_state.generated_images:
-            zip_file.writestr(item["filename"], item["data"])
-            
-    # Show the Download All Button at the top!
-    st.download_button(
-        label="📦 DOWNLOAD ALL 40 IMAGES (ZIP FILE)",
-        data=zip_buffer.getvalue(),
-        file_name=f"{company_name}_All_Frames.zip",
-        mime="application/zip",
-        use_container_width=True
-    )
-    
+        with p_cols[min(len(st.session_state.brand_palette), 11)]:
+            with st.popover("➕", use_container_width=True):
+                picked = st.color_picker("Add Color", "#FF0000")
+                if st.button("Add", type="secondary"):
+                    if picked not in st.session_state.brand_palette:
+                        st.session_state.brand_palette.append(picked)
+                        st.rerun()
+
     st.markdown("---")
-    
-    # Display the grid for individual downloads
-    st.write("### Collection 1: Dynamic Styles (1-20)")
-    for row in range(4):
-        cols = st.columns(5)
-        for col in range(5):
-            idx = (row * 5) + col
-            item = st.session_state.generated_images[idx]
-            with cols[col]:
-                st.image(item["data"], caption=item["caption"], use_container_width=True)
-                st.download_button("Download", data=item["data"], file_name=item["filename"], mime="image/png", key=f"dl_a_{idx}")
+    d_cols = st.columns(6)
+    w_val = d_cols[0].number_input("↔️ Width", value=1200)
+    h_val = d_cols[1].number_input("↕️ Height", value=1800)
+    mt_val = d_cols[2].number_input("⬆️ Top Margin", value=200)
+    mb_val = d_cols[3].number_input("⬇️ Bottom Margin", value=200)
+    ms_val = d_cols[4].number_input("⬅️➡️ Side Margin", value=100)
+    radius_val = d_cols[5].number_input("📐 Corner Curve", value=60)
 
-    st.write("### Collection 2: Curated Themes (21-40)")
-    for row in range(4):
-        cols = st.columns(5)
-        for col in range(5):
-            idx = 20 + (row * 5) + col
-            item = st.session_state.generated_images[idx]
-            with cols[col]:
-                st.image(item["data"], caption=item["caption"], use_container_width=True)
-                st.download_button("Download", data=item["data"], file_name=item["filename"], mime="image/png", key=f"dl_b_{idx}")
+loaded_stickers = []
+if use_ai_stickers and category_input.strip() != "":
+    with st.spinner(f"Fetching AI Stickers from RTDB/Pixabay for '{category_input}'..."):
+        keywords = get_ai_keywords(category_input)
+        raw_bytes = fetch_pixabay_stickers(keywords)
+        loaded_stickers = [Image.open(io.BytesIO(b)).convert("RGBA") for b in raw_bytes]
+
+with right_panel:
+    st.write("### 👁️ Live Preview")
+    preview_img = generate_branded_frame(
+        company_name, brand_text_color, text_size, text_pos, text_order, category_input, 
+        active_logos, use_ai_stickers, loaded_stickers, st.session_state.brand_palette, 
+        w_val, h_val, mt_val, mb_val, ms_val, bg_style, pattern_style, radius_val
+    )
+    st.image(preview_img, use_container_width=True, caption="Auto-updates with settings")
+
+st.markdown("---")
+
+if st.button("✨ GENERATE 40 IMPACTFUL DESIGNS", type="primary", use_container_width=True):
+    st.session_state.all_images = []
+    with st.spinner("Rendering Cloud Graphics Batch..."):
+        for i in range(40):
+            img = generate_branded_frame(
+                company_name, brand_text_color, text_size, text_pos, text_order, category_input, 
+                active_logos, use_ai_stickers, loaded_stickers, st.session_state.brand_palette, 
+                w_val, h_val, mt_val, mb_val, ms_val, bg_style, pattern_style, radius_val
+            )
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            st.session_state.all_images.append({"data": buf.getvalue(), "filename": f"{category_input}_{i+1}.png"})
+
+if st.session_state.all_images:
+    z_buf = io.BytesIO()
+    with zipfile.ZipFile(z_buf, "w") as zf:
+        for itm in st.session_state.all_images: zf.writestr(itm["filename"], itm["data"])
+    st.download_button("📦 DOWNLOAD ALL (ZIP)", data=z_buf.getvalue(), file_name="Design_Pack_v12.zip", type="primary", use_container_width=True)
+
+    st.markdown("---")
+    total_imgs = len(st.session_state.all_images)
+    for i in range(0, total_imgs, 5):
+        grid = st.columns(5)
+        for j in range(5):
+            idx = i + j
+            if idx < total_imgs:
+                with grid[j]:
+                    st.image(st.session_state.all_images[idx]["data"], use_container_width=True)
+                    st.download_button("Download", data=st.session_state.all_images[idx]["data"], file_name=st.session_state.all_images[idx]["filename"], key=f"btn_{idx}", type="secondary")
